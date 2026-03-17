@@ -13,7 +13,7 @@ WORKER_ARG="--number_of_workers $NUM_WORKERS"
 
 {
   module load conda
-  conda activate env-from-npl-2024a
+  conda activate /glade/work/pavelp/conda-envs/env-from-npl-2024a
 
   $PYTHON_CMD mom6_tools.stats "$YAML_FILE" -time_series $WORKER_ARG
   #$PYTHON_CMD mom6_tools.poleward_heat_transport "$YAML_FILE" $WORKER_ARG
