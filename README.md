@@ -42,11 +42,12 @@ or as a standalong job:
 qsub -v YAML_FILE=experiment.yaml pbs_script.pbs
 ```
 
-See the netcdf files with the computed diagnostics in the following folder:
-```
-ls ncfiles
-```
-Also, some figures can appear here:
+See the results in figures:
 ```
 tree PNG
+```
+
+Some diagnostics stored as netcdf files:
+```
+ls ncfiles
 ```
