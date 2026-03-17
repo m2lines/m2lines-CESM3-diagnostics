@@ -2,7 +2,11 @@
 We assume that forced ocean simulations are compeleted and the output is located in $SCRATCH. Next, we need to analyze the results with [mom6-tools](https://github.com/NCAR/mom6-tools).
 
 ## Conda environment
-This section is optional and can be skipped.
+This section is optional. Feel free to use my environment:
+```
+module load conda
+conda activate /glade/work/pavelp/conda-envs/env-from-npl-2024a
+```
 
 We start with creating a conda environment by cloning one of the standard environments in NCAR:
 ```
