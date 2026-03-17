@@ -1,9 +1,10 @@
 # Diagnostics of ocean models with mom6-tools
-We assume that ~60-years runs in forced ocean are compeleted and the output is located in $SCRATCH. Next, we need to analyze the results with [mom6-tools](https://github.com/NCAR/mom6-tools).
+We assume that forced ocean simulations are compeleted and the output is located in $SCRATCH. Next, we need to analyze the results with [mom6-tools](https://github.com/NCAR/mom6-tools).
 
 ## Conda environment
 Feel free to use my environment
 ```
+module load conda
 conda activate /glade/work/pavelp/conda-envs/env-from-npl-2024a
 ```
 or keep following this section.
@@ -25,11 +26,11 @@ cd mom6-tools
 pip install -e .
 ```
 ## Computing diagnostics
-Provide the path to the experiment in `default.yaml` and provide the environment in `run_diagnostics.sh`, and run the script:
+Provide the path to the experiment in `experiment.yaml`, provide the conda environment in `run_diagnostics.sh`, and run the script:
 ```
-./run_diagnostics.sh default.yaml
+./run_diagnostics.sh experiment.yaml
 ```
-Note that you can comment out unnecessary diagnostics.
+Note that you can uncomment necessary diagnostics.
 See the results in the following folder:
 ```
 ls ncfiles
