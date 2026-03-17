@@ -31,8 +31,12 @@ Provide the path to the experiment in `experiment.yaml`, provide the conda envir
 ./run_diagnostics.sh experiment.yaml
 ```
 Note that you can uncomment necessary diagnostics.
-See the results in the following folder:
+
+See the netcdf files with the computed diagnostics in the following folder:
 ```
 ls ncfiles
 ```
-output: `no-GM_mon_ave_global_means.nc`.
+Also, some figures can appear here:
+```
+tree PNG
+```
