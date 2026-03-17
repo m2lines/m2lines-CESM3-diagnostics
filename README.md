@@ -30,7 +30,12 @@ Provide the path to the experiment in `experiment.yaml`, provide the conda envir
 ```
 ./run_diagnostics.sh experiment.yaml
 ```
-Note that you can uncomment necessary diagnostics.
+Feel free to uncomment the necessary diagnostics.
+
+Note: short command to send computation to a compute node:
+```
+qcmd -- ./run_diagnostics.sh experiment.yaml 
+```
 
 See the netcdf files with the computed diagnostics in the following folder:
 ```
