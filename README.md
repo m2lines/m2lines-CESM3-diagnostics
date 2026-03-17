@@ -33,9 +33,13 @@ Provide the path to the experiment in `experiment.yaml`, and run the script:
 ```
 Feel free to uncomment the necessary diagnostics.
 
-Note: short command to send computation to a compute node:
+Note: short command to send computation to a compute node interactively:
 ```
 qcmd -- ./run_diagnostics.sh experiment.yaml 
+```
+or as a standalong job:
+```
+qsub -v YAML_FILE=experiment.yaml pbs_script.pbs
 ```
 
 See the netcdf files with the computed diagnostics in the following folder:
