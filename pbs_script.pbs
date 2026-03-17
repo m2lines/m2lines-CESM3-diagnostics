@@ -1,0 +1,15 @@
+#!/bin/bash
+#PBS -N diag_job
+#PBS -A CESM0019
+#PBS -q main
+#PBS -l select=1:ncpus=1:mem=55GB
+#PBS -l walltime=12:00:00
+#PBS -o /dev/null
+#PBS -e /dev/null
+#PBS -V
+
+# Usage: qsub -v YAML_FILE=experiment.yaml pbs_script.pbs
+
+cd $PBS_O_WORKDIR
+
+./run_diagnostics.sh "$YAML_FILE"
