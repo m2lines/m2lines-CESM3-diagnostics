@@ -1,9 +1,10 @@
 #!/bin/bash
 #PBS -N diag_job
 #PBS -A CESM0019
-#PBS -q main
+#PBS -q develop
+#PBS -l job_priority=premium
 #PBS -l select=1:ncpus=1:mem=55GB
-#PBS -l walltime=12:00:00
+#PBS -l walltime=06:00:00
 #PBS -o /dev/null
 #PBS -e /dev/null
 #PBS -V
