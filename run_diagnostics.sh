@@ -19,30 +19,30 @@ WORKER_ARG="--number_of_workers $NUM_WORKERS"
   # Time series
   $PYTHON_CMD mom6_tools.stats "$YAML_FILE" -time_series $WORKER_ARG
 
-  ## Poleward heat transport (global, Atlantic, Pacific)
-  #$PYTHON_CMD mom6_tools.poleward_heat_transport "$YAML_FILE" $WORKER_ARG
+  # Poleward heat transport (global, Atlantic, Pacific)
+  $PYTHON_CMD mom6_tools.poleward_heat_transport "$YAML_FILE" $WORKER_ARG
 
-  ## MOC, AMOC
-  #$PYTHON_CMD mom6_tools.moc "$YAML_FILE" $WORKER_ARG
+  # MOC, AMOC
+  $PYTHON_CMD mom6_tools.moc "$YAML_FILE" $WORKER_ARG
 
-  ## MOC, AMOC in sigma coordinates
-  #$PYTHON_CMD mom6_tools.moc_sigma2 "$YAML_FILE" $WORKER_ARG
+  # MOC, AMOC in sigma coordinates
+  $PYTHON_CMD mom6_tools.moc_sigma2 "$YAML_FILE" $WORKER_ARG
+
+  # Mixed Layer Depth
+  $PYTHON_CMD mom6_tools.surface "$YAML_FILE" $WORKER_ARG
+
+  # T&S horizontal biases
+  $PYTHON_CMD mom6_tools.TS_levels "$YAML_FILE" $WORKER_ARG
+
+  # Sections transports, i.e. Drake Passage, Bering Strait, etc.
+  $PYTHON_CMD mom6_tools.section_transports "$YAML_FILE" $WORKER_ARG -save_ncfile
 
   ## Equatorial jets and stratification
   #$PYTHON_CMD mom6_tools.equatorial_comparison "$YAML_FILE" $WORKER_ARG
-
-  ## Mixed Layer Depth
-  #$PYTHON_CMD mom6_tools.surface "$YAML_FILE" $WORKER_ARG
-
-  ## T&S horizontal biases
-  #$PYTHON_CMD mom6_tools.TS_levels "$YAML_FILE" $WORKER_ARG
-
-  ## Sections transports, i.e. Drake Passage, Bering Strait, etc.
-  #$PYTHON_CMD mom6_tools.section_transports "$YAML_FILE" $WORKER_ARG -save_ncfile
 
   ## Temperature drift
   #$PYTHON_CMD mom6_tools.drift "$YAML_FILE" thetao $WORKER_ARG --rms --drift --savefig
 
   ## Salinity drift
   #$PYTHON_CMD mom6_tools.drift "$YAML_FILE" so $WORKER_ARG --rms --drift --savefig
-} &> "$LOG_FILE"
+} &>> "$LOG_FILE"

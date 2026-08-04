@@ -1,0 +1,7 @@
+*.png*
+*.log
+ncfiles*
+*checkpoint.ipynb*
+data*
+yamls*
+interactive_job.sh
