@@ -5,3 +5,4 @@ ncfiles*
 data*
 yamls*
 interactive_job.sh
+notebooks/__pycache__/experiment.cpython-311.pyc
