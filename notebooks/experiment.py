@@ -114,6 +114,7 @@ class Experiment:
         cn = args.casename or self.name
         args.static = cn + fnames.get('static', '')
         args.native = cn + fnames.get('native', '')
+        args.z = cn + fnames.get('z', '')
         args.ice = cn + fnames.get('ice', '')
         args.geom = cn + fnames.get('geom', '')
 
@@ -200,6 +201,23 @@ class Experiment:
     def diftrelo_surface(self):
         """(yh, xh) time-mean surface epineutral diffusivity [m2 s-1]."""
         return xr.open_dataset(self._path('diftrelo_surface.nc'))['diftrelo_surface']
+
+    def meke_gm_src(self):
+        """(yh, xh) time-mean APE dissipation by the buoyancy (GM/MEKE)
+        parameterization, ``MEKE_GM_src`` [W m-2]."""
+        return xr.open_dataset(self._path('meke_gm_src.nc'))['MEKE_GM_src']
+
+    def gm_overturning_1km(self):
+        """Dataset with the parameterized (GM) overturning streamfunction at
+        1000 m depth as a global (yq, xh) map [Sv], plus ``geolonv``/``geolatv``
+        2-D coordinates for plotting."""
+        return xr.open_dataset(self._path('gm_overturning_1km.nc'))
+
+    def ke_zb2020_vertsum(self):
+        """(yh, xh) time-mean, vertically-integrated kinetic-energy source of the
+        ZB2020 momentum parameterization, ``rho0 * KE_ZB2020.sum('z_l')``
+        [W m-2]."""
+        return xr.open_dataset(self._path('ke_zb2020_vertsum.nc'))['KE_ZB2020_vertsum']
 
     def atm_mean(self):
         return xr.open_dataset(self._path('atm_time_mean.nc'))
@@ -353,3 +371,124 @@ class Experiment:
             'casename': self.name,
         })
         da.to_dataset().to_netcdf(self._path('diftrelo_surface.nc'))
+
+    def compute_meke_gm_src(self):
+        """Time-mean APE dissipation by the buoyancy (GM/MEKE) parameterization.
+
+        Reads the raw native history and averages ``MEKE_GM_src`` (source of
+        mesoscale eddy kinetic energy from the GM parameterization, already a
+        vertically-integrated 2-D field, W m-2) over the standard averaging
+        window (``Avg.start_date`` .. ``Avg.end_date``). The result is a 2-D
+        ``(yh, xh)`` map saved to ``<folder>/<name>_meke_gm_src.nc``.
+        """
+        ds = xr.open_mfdataset(
+            self.args.OUTDIR + '/' + self.args.native,
+            parallel=True, data_vars='minimal',
+            coords='minimal', compat='override',
+            preprocess=lambda ds: ds[['MEKE_GM_src']])
+
+        ds = ds.sel(time=slice(self.args.start_date, self.args.end_date))
+
+        with ProgressBar():
+            da = ds['MEKE_GM_src'].mean('time').compute()
+
+        da.name = 'MEKE_GM_src'
+        da.attrs.update({
+            'long_name': 'Time-mean APE dissipation by the buoyancy (GM/MEKE) '
+                         'parameterization',
+            'units': 'W m-2',
+            'start_date': self.args.start_date,
+            'end_date': self.args.end_date,
+            'casename': self.name,
+        })
+        da.to_dataset().to_netcdf(self._path('meke_gm_src.nc'))
+
+    def compute_gm_overturning_1km(self):
+        """Parameterized (GM) overturning streamfunction at 1000 m as a map.
+
+        Reads the parameterized meridional bolus transport ``vhGM`` (kg s-1)
+        from the z-coordinate history (``*.mom6.h.z.*``), averages it over the
+        standard window, converts to Sv and vertically accumulates it from the
+        bottom to obtain a local overturning streamfunction. The layer nearest
+        1000 m is stored as a global ``(yq, xh)`` map together with the
+        ``geolonv``/``geolatv`` 2-D coordinates, in
+        ``<folder>/<name>_gm_overturning_1km.nc``.
+        """
+        files = self.args.OUTDIR + '/' + self.args.z
+        ds = xr.open_mfdataset(
+            files,
+            parallel=True, data_vars='minimal',
+            coords='minimal', compat='override',
+            preprocess=lambda ds: ds[['vhGM']])
+
+        ds = ds.sel(time=slice(self.args.start_date, self.args.end_date))
+
+        with ProgressBar():
+            vhGM = ds['vhGM'].mean('time').compute()      # (z_l, yq, xh), kg s-1
+
+        vh = vhGM * 1e-9                                   # -> Sv
+        # Local overturning streamfunction: negative cumulative transport from
+        # the bottom up to the top interface of each layer (sign convention of
+        # spatial_overturning.ipynb: psi[k-1] = psi[k] - vh[k-1], psi_bottom=0),
+        # so the Southern Ocean cell is negative and the North Atlantic positive.
+        psi = -(vh.fillna(0.0)
+                  .isel(z_l=slice(None, None, -1))
+                  .cumsum('z_l')
+                  .isel(z_l=slice(None, None, -1)))
+
+        psi_1km = psi.sel(z_l=1000.0, method='nearest')
+        # Blank cells whose water column does not reach ~1000 m (NaN at that
+        # level) so land / shallow shelves render as land, not zero.
+        psi_1km = psi_1km.where(vhGM.sel(z_l=1000.0, method='nearest').notnull())
+
+        psi_1km.name = 'psi_gm_1km'
+        psi_1km.attrs.update({
+            'long_name': 'Parameterized (GM) overturning streamfunction at ~1000 m',
+            'units': 'Sv',
+            'z_l': float(psi_1km['z_l']),
+            'start_date': self.args.start_date,
+            'end_date': self.args.end_date,
+            'casename': self.name,
+        })
+
+        out = psi_1km.to_dataset()
+        # Attach v-point geographic coordinates from the ocean geometry file.
+        geom = xr.open_dataset(self.args.OUTDIR + '/' + self.args.geom)
+        out['geolonv'] = (('yq', 'xh'), geom['geolonv'].values)
+        out['geolatv'] = (('yq', 'xh'), geom['geolatv'].values)
+        out.to_netcdf(self._path('gm_overturning_1km.nc'))
+
+    def compute_ke_zb2020_vertsum(self):
+        """Vertically-integrated kinetic-energy source of the ZB2020 scheme.
+
+        Reads ``KE_ZB2020`` (m3 s-3) from the z-coordinate history
+        (``*.mom6.h.z.*``), forms the column-integrated energy-injection rate
+        ``rho0 * KE_ZB2020.sum('z_l')`` (rho0 = 1023 kg m-3, giving W m-2) and
+        averages it over the standard window. The 2-D ``(yh, xh)`` map is saved
+        to ``<folder>/<name>_ke_zb2020_vertsum.nc``.
+        """
+        rho0 = 1023.0
+
+        files = self.args.OUTDIR + '/' + self.args.z
+        ds = xr.open_mfdataset(
+            files,
+            parallel=True, data_vars='minimal',
+            coords='minimal', compat='override',
+            preprocess=lambda ds: ds[['KE_ZB2020']])
+
+        ds = ds.sel(time=slice(self.args.start_date, self.args.end_date))
+
+        with ProgressBar():
+            da = (rho0 * ds['KE_ZB2020'].sum('z_l', min_count=1)).mean('time').compute()
+
+        da.name = 'KE_ZB2020_vertsum'
+        da.attrs.update({
+            'long_name': 'Time-mean vertically-integrated kinetic-energy source '
+                         'of the ZB2020 momentum parameterization '
+                         '(rho0 * KE_ZB2020.sum(z_l), rho0 = 1023 kg m-3)',
+            'units': 'W m-2',
+            'start_date': self.args.start_date,
+            'end_date': self.args.end_date,
+            'casename': self.name,
+        })
+        da.to_dataset().to_netcdf(self._path('ke_zb2020_vertsum.nc'))
