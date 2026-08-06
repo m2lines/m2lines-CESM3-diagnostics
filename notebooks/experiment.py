@@ -219,6 +219,30 @@ class Experiment:
         [W m-2]."""
         return xr.open_dataset(self._path('ke_zb2020_vertsum.nc'))['KE_ZB2020_vertsum']
 
+    def barotropic_streamfunction(self):
+        """Dataset with the barotropic (depth-integrated) streamfunction as a
+        global (yq, xq) map [Sv], plus ``geolonb``/``geolatb`` 2-D coordinates
+        for plotting."""
+        return xr.open_dataset(self._path('barotropic_streamfunction.nc'))
+
+    def ssh(self):
+        """Dataset with sea-surface height on the T-grid (yh, xh): ``mean_ssh``,
+        ``ssh_variance`` and the monthly ``ssh_climatology`` [m]."""
+        return xr.open_dataset(self._path('SSH.nc'))
+
+    def sst_std(self):
+        """(yh, xh) temporal standard deviation of detrended, deseasonalised
+        sea-surface temperature [degC]."""
+        return xr.open_dataset(self._path('sst_std.nc'))['sst_std']
+
+    def sst_eof1(self):
+        """Dataset with the leading area-weighted EOF of the detrended,
+        deseasonalised SST anomalies: the spatial pattern ``sst_eof1``
+        (yh, xh) [degC per +1 std of PC1] and the standardized principal
+        component ``sst_pc1`` (time). The ``explained_variance`` attribute of
+        ``sst_eof1`` gives the fraction of area-weighted variance explained."""
+        return xr.open_dataset(self._path('sst_eof1.nc'))
+
     def atm_mean(self):
         return xr.open_dataset(self._path('atm_time_mean.nc'))
 
@@ -492,3 +516,222 @@ class Experiment:
             'casename': self.name,
         })
         da.to_dataset().to_netcdf(self._path('ke_zb2020_vertsum.nc'))
+
+    def compute_barotropic_streamfunction(self):
+        """Barotropic (depth-integrated) streamfunction as a global map.
+
+        Follows the CDFtools algorithm: the depth-integrated zonal transport
+        ``umo`` (kg s-1) from the z-coordinate history (``*.mom6.h.z.*``) is
+        summed over depth and cumulatively integrated in the meridional
+        direction from the South Pole (through land), converted to Sv. The
+        streamfunction is defined on the cell corner (``yq``, ``xq``) and is
+        offset to zero over the Americas (xq=-80, yq=40) for convenient
+        plotting. Saved to ``<folder>/<name>_barotropic_streamfunction.nc``
+        together with the corner coordinates ``geolonb``/``geolatb``.
+        """
+        files = self.args.OUTDIR + '/' + self.args.z
+        ds = xr.open_mfdataset(
+            files,
+            parallel=True, data_vars='minimal',
+            coords='minimal', compat='override',
+            preprocess=lambda ds: ds[['umo']])
+
+        ds = ds.sel(time=slice(self.args.start_date, self.args.end_date))
+
+        with ProgressBar():
+            umo = ds['umo'].mean('time').compute()        # (z_l, yh, xq), kg s-1
+
+        # Ocean mask (umo is NaN over land / below the bottom).
+        wet = umo.notnull().any('z_l')                    # (yh, xq)
+
+        # 1e9 converts kg s-1 to m3 s-1 (1e3) and then to Sverdrups (1e6).
+        # Integrate the depth-summed zonal transport meridionally from the
+        # South Pole (through land). The result sits on the cell corner, so
+        # rename yh -> yq (the coordinate keeps the nominal latitudes, used
+        # only for the reference-point selection below).
+        psi = -(umo.sum('z_l').cumsum('yh')) / 1e9
+        psi = psi.rename({'yh': 'yq'})
+        wet = wet.rename({'yh': 'yq'})
+
+        # Set the streamfunction to zero over the Americas (uses the value
+        # integrated through land, before masking).
+        psi = psi - psi.sel(xq=-80, yq=40, method='nearest')
+
+        # Blank land with NaN for display.
+        psi = psi.where(wet)
+
+        psi.name = 'psi_barotropic'
+        psi.attrs.update({
+            'long_name': 'Barotropic (depth-integrated) streamfunction',
+            'units': 'Sv',
+            'reference': 'zero at Americas (xq=-80, yq=40)',
+            'start_date': self.args.start_date,
+            'end_date': self.args.end_date,
+            'casename': self.name,
+        })
+
+        out = psi.to_dataset()
+        # Attach corner (q-point) geographic coordinates for plotting.
+        geom = xr.open_dataset(self.args.OUTDIR + '/' + self.args.geom)
+        out['geolonb'] = (('yq', 'xq'), geom['geolonb'].values)
+        out['geolatb'] = (('yq', 'xq'), geom['geolatb'].values)
+        out.to_netcdf(self._path('barotropic_streamfunction.nc'))
+
+    def compute_sst_std(self):
+        """Temporal standard deviation of detrended, deseasonalised SST.
+
+        Reads ``thetao`` (Sea Water Potential Temperature) from the
+        z-coordinate history (``*.mom6.h.z.*``), keeps the uppermost level
+        (``z_l`` index 0) as the SST, and over the standard averaging window
+        (``Avg.start_date`` .. ``Avg.end_date``):
+
+        1. removes an independent linear trend ``a + b t`` at each grid point,
+        2. removes the monthly climatology (mean seasonal cycle) from the
+           detrended series,
+        3. takes the temporal standard deviation of the remaining anomalies.
+
+        The 2-D ``(yh, xh)`` map [degC] is saved to
+        ``<folder>/<name>_sst_std.nc``.
+        """
+        files = self.args.OUTDIR + '/' + self.args.z
+        ds = xr.open_mfdataset(
+            files,
+            parallel=True, data_vars='minimal',
+            coords='minimal', compat='override',
+            preprocess=lambda ds: ds[['thetao']])
+
+        # Uppermost level = SST, restricted to the averaging window.
+        sst = ds['thetao'].isel(z_l=0)
+        sst = sst.sel(time=slice(self.args.start_date, self.args.end_date))
+
+        with ProgressBar():
+            sst = sst.load()
+
+        # 1. Remove an independent linear trend a + b*t at each grid point.
+        coeffs = sst.polyfit(dim='time', deg=1)
+        trend = xr.polyval(sst['time'], coeffs['polyfit_coefficients'])
+        detrended = sst - trend
+
+        # 2. Remove the monthly climatology (mean seasonal cycle).
+        clim = detrended.groupby('time.month').mean('time')
+        anom = detrended.groupby('time.month') - clim
+
+        # 3. Temporal standard deviation of the remaining anomalies.
+        da = anom.std('time')
+
+        da.name = 'sst_std'
+        da.attrs.update({
+            'long_name': 'Temporal standard deviation of detrended, '
+                         'deseasonalised sea-surface temperature',
+            'units': 'degC',
+            'start_date': self.args.start_date,
+            'end_date': self.args.end_date,
+            'casename': self.name,
+        })
+        da.to_dataset().to_netcdf(self._path('sst_std.nc'))
+
+    def compute_sst_eof1(self):
+        """Leading area-weighted EOF of detrended, deseasonalised SST.
+
+        Builds the SST anomalies exactly as :meth:`compute_sst_std` (uppermost
+        ``thetao`` level over the averaging window, per-gridpoint linear trend
+        and monthly climatology removed), then computes the first Empirical
+        Orthogonal Function accounting for the grid-cell area, so that the
+        EOF spatial patterns are orthogonal with respect to the inner product
+        on the sphere, ``<u, v> = sum_i area_i u_i v_i``.
+
+        The anomaly field ``a[t, i]`` is weighted by ``sqrt(area_i)`` before an
+        SVD; the physical spatial patterns ``e_k = v_k / sqrt(area)`` then
+        satisfy ``sum_i area_i e_k(i) e_l(i) = delta_kl`` (area-orthonormal).
+        The leading principal component is standardised to unit variance and
+        the spatial pattern is expressed as the regression of the anomalies
+        onto that PC (``degC`` per +1 std of PC1). Saved to
+        ``<folder>/<name>_sst_eof1.nc`` (variables ``sst_eof1`` and
+        ``sst_pc1``; ``sst_eof1`` carries an ``explained_variance`` attribute).
+        """
+        files = self.args.OUTDIR + '/' + self.args.z
+        ds = xr.open_mfdataset(
+            files,
+            parallel=True, data_vars='minimal',
+            coords='minimal', compat='override',
+            preprocess=lambda ds: ds[['thetao']])
+
+        # Uppermost level = SST, restricted to the averaging window.
+        sst = ds['thetao'].isel(z_l=0)
+        sst = sst.sel(time=slice(self.args.start_date, self.args.end_date))
+
+        with ProgressBar():
+            sst = sst.load()
+
+        # Same anomalies as compute_sst_std: remove a per-gridpoint linear
+        # trend, then the monthly climatology.
+        coeffs = sst.polyfit(dim='time', deg=1)
+        trend = xr.polyval(sst['time'], coeffs['polyfit_coefficients'])
+        detrended = sst - trend
+        clim = detrended.groupby('time.month').mean('time')
+        anom = detrended.groupby('time.month') - clim          # (time, yh, xh)
+
+        nt, ny, nx = anom.shape
+        A = anom.values.reshape(nt, ny * nx)                   # (time, space)
+
+        # Area weights over ocean (self.area is NaN over land).
+        area = self.area.values.reshape(ny * nx)
+        w = np.sqrt(area)                                      # sqrt(area)
+
+        # Keep only points that are ocean and finite at every time step.
+        mask = np.isfinite(w) & np.isfinite(A).all(axis=0)
+        A = A[:, mask]
+        w = w[mask]
+
+        # Ensure a zero temporal mean before decomposing.
+        A = A - A.mean(axis=0, keepdims=True)
+
+        # Area-weighted anomaly matrix; its right singular vectors are
+        # orthonormal in the Euclidean sense, i.e. the physical patterns
+        # (v / sqrt(area)) are orthonormal under the spherical inner product.
+        B = A * w[None, :]
+        _, S, Vt = np.linalg.svd(B, full_matrices=False)
+
+        v1 = Vt[0]                                             # weighted pattern
+        pc_raw = B @ v1                                        # PC1 [degC-like]
+        pc1 = pc_raw / pc_raw.std()                            # unit variance
+        pattern = (A * pc1[:, None]).mean(axis=0)             # regression [degC]
+        explained = float(S[0] ** 2 / (S ** 2).sum())
+
+        # Sign convention: area-weighted mean of the pattern is positive.
+        if np.sum(pattern * (w ** 2)) < 0:
+            pattern = -pattern
+            pc1 = -pc1
+
+        pat_full = np.full(ny * nx, np.nan)
+        pat_full[mask] = pattern
+        pat2d = pat_full.reshape(ny, nx)
+
+        eof = xr.DataArray(
+            pat2d, dims=('yh', 'xh'),
+            coords={'yh': anom['yh'], 'xh': anom['xh']}, name='sst_eof1')
+        eof.attrs.update({
+            'long_name': 'Leading area-weighted EOF of detrended, '
+                         'deseasonalised SST (regression onto standardised '
+                         'PC1)',
+            'units': 'degC',
+            'explained_variance': explained,
+            'start_date': self.args.start_date,
+            'end_date': self.args.end_date,
+            'casename': self.name,
+        })
+
+        pc = xr.DataArray(
+            pc1, dims=('time',), coords={'time': anom['time']}, name='sst_pc1')
+        pc.attrs.update({
+            'long_name': 'Standardised leading principal component of '
+                         'detrended, deseasonalised SST',
+            'units': '1 (unit variance)',
+            'explained_variance': explained,
+            'start_date': self.args.start_date,
+            'end_date': self.args.end_date,
+            'casename': self.name,
+        })
+
+        xr.Dataset({'sst_eof1': eof, 'sst_pc1': pc}).to_netcdf(
+            self._path('sst_eof1.nc'))
