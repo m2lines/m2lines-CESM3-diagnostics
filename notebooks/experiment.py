@@ -243,7 +243,13 @@ class Experiment:
         ``sst_eof1`` gives the fraction of area-weighted variance explained."""
         return xr.open_dataset(self._path('sst_eof1.nc'))
 
+    def uv_mean(self):
+        """Dataset with the time-mean full 3D velocity: zonal ``uo``
+        (z_l, yh, xq) and meridional ``vo`` (z_l, yq, xh) [m s-1]."""
+        return xr.open_dataset(self._path('uv_mean.nc'))
+
     def atm_mean(self):
+        return xr.open_dataset(self._path('atm_time_mean.nc'))
         return xr.open_dataset(self._path('atm_time_mean.nc'))
 
     def heat_transport(self):
@@ -735,3 +741,39 @@ class Experiment:
 
         xr.Dataset({'sst_eof1': eof, 'sst_pc1': pc}).to_netcdf(
             self._path('sst_eof1.nc'))
+
+    def compute_uv_mean(self):
+        """Time-mean full 3D zonal and meridional velocity.
+
+        Reads ``uo`` (z_l, yh, xq) and ``vo`` (z_l, yq, xh) [m s-1] from the
+        z-coordinate history (``*.mom6.h.z.*``) and averages the full 3D fields
+        over the standard window (``Avg.start_date`` .. ``Avg.end_date``). The
+        two velocity components are saved on their native staggered grids to
+        ``<folder>/<name>_uv_mean.nc``.
+        """
+        files = self.args.OUTDIR + '/' + self.args.z
+        ds = xr.open_mfdataset(
+            files,
+            parallel=True, data_vars='minimal',
+            coords='minimal', compat='override',
+            preprocess=lambda ds: ds[['uo', 'vo']])
+
+        ds = ds.sel(time=slice(self.args.start_date, self.args.end_date))
+
+        with ProgressBar():
+            uo = ds['uo'].mean('time').compute()
+            vo = ds['vo'].mean('time').compute()
+
+        attrs = {
+            'start_date': self.args.start_date,
+            'end_date': self.args.end_date,
+            'casename': self.name,
+        }
+        uo.name = 'uo'
+        uo.attrs.update({'long_name': 'Time-mean zonal velocity',
+                         'units': 'm s-1', **attrs})
+        vo.name = 'vo'
+        vo.attrs.update({'long_name': 'Time-mean meridional velocity',
+                         'units': 'm s-1', **attrs})
+
+        xr.Dataset({'uo': uo, 'vo': vo}).to_netcdf(self._path('uv_mean.nc'))

@@ -15,3 +15,4 @@ This repository serves for analysis of CESM climate model runs.
 * Never use worktree directory on the cluster
 * Do not write outside of root directory
 * You change notebooks. I run cells myself.
+* Before changing notebook - make sure you read the latest version and my edits
