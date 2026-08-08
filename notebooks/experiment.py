@@ -75,6 +75,28 @@ def inferred_heat_transport(energy_in, lat=None, latax=None):
     return result
 
 
+def layer_thickness_from_midpoints(z_l):
+    """Reconstruct nominal layer thickness from a 1-D array of layer
+    *midpoint* depths ``z_l``, assuming each midpoint is exactly halfway
+    between its two bounding interfaces (true for the MOM6 z* diagnostic
+    grid, and exactly reproduces the model's own ``z_i`` interfaces when
+    checked against it). Useful when only a static, time-mean field is
+    available (no per-cell layer-thickness diagnostic ``h`` to weight
+    with), e.g. recovering a volume-weighted average from a WOA
+    climatology. Returns a 1-D array/DataArray of thicknesses [m], same
+    type and coordinate as ``z_l``.
+    """
+    z_l_vals = np.asarray(z_l)
+    z_i = np.empty(z_l_vals.size + 1)
+    z_i[0] = 0.0
+    for k in range(z_l_vals.size):
+        z_i[k + 1] = 2 * z_l_vals[k] - z_i[k]
+    dz = np.diff(z_i)
+    if isinstance(z_l, xr.DataArray):
+        return xr.DataArray(dz, dims=z_l.dims, coords=z_l.coords)
+    return dz
+
+
 class Experiment:
     """A single model experiment with readers for its postprocessed diagnostics.
 
@@ -219,6 +241,17 @@ class Experiment:
     def global_means(self):
         """Monthly global-mean scalar timeseries (contains ``thetaoga`` etc.)."""
         return xr.open_dataset(self._path('mon_ave_global_means.nc'))
+
+    def ocean_heat_content(self):
+        """Dataset with monthly volume-averaged potential temperature
+        (``thetao_*``) and salinity (``so_*``) timeseries over five depth
+        ranges: ``surface`` (shallowest ``z_l`` level), ``0_300m``,
+        ``300_700m``, ``700_2000m``, ``2000m_plus``. Also carries the raw
+        ``(time, z_l)`` vertical profiles (``thetao_volcello_profile``,
+        ``so_volcello_profile``, ``volcello_profile``) they were derived
+        from, so other depth ranges can be recovered without re-reading
+        the raw history. See :meth:`compute_ocean_heat_content`."""
+        return xr.open_dataset(self._path('ocean_heat_content.nc'))
 
     def thetao(self):
         return xr.open_dataset(self._path('thetao_time_mean.nc'))
@@ -976,3 +1009,118 @@ class Experiment:
                          'units': 'm s-1', **attrs})
 
         xr.Dataset({'uo': uo, 'vo': vo}).to_netcdf(self._path('uv_mean.nc'))
+
+    # Depth ranges shared by compute_ocean_heat_content (lo exclusive, hi
+    # inclusive; None means unbounded). z_l boundaries fall in gaps of the
+    # CESM3/MOM6 diagnostic z-grid (250|312.5, 700|800, 1750|2062.5 m), so
+    # every layer belongs unambiguously to one range.
+    OCEAN_HEAT_CONTENT_DEPTH_RANGES = [
+        ('0_300m', None, 300.0),
+        ('300_700m', 300.0, 700.0),
+        ('700_2000m', 700.0, 2000.0),
+        ('2000m_plus', 2000.0, None),
+    ]
+
+    def compute_ocean_heat_content(self):
+        """Area/volume-averaged potential temperature and salinity
+        timeseries over five depth ranges, extending the global-mean
+        ``thetaoga``/``soga`` timeseries in ``key_diagnostics.ipynb`` with a
+        depth breakdown.
+
+        Reads ``thetao``, ``so`` and the precomputed cell-volume diagnostic
+        ``volcello`` from the full z-coordinate history (``*.mom6.h.z.*`` --
+        the full simulation, not just the standard averaging window, to
+        match the existing ``thetaoga`` timeseries). ``volcello`` is used
+        as-is (no need to reconstruct it from layer thickness * area): it
+        is already the model's own grid-cell volume, correctly handling
+        partial bottom cells, on the same fixed ``z_l`` depth grid as
+        ``thetao``/``so``.
+
+        The horizontal (``xh``, ``yh``) integral of ``var * volcello`` and
+        of ``volcello`` alone is computed *once* for the full vertical
+        profile -- not separately per depth range -- giving two small
+        ``(time, z_l)`` arrays. Every depth-range average (including
+        ``surface``, which is just the ``z_l`` index-0 level of the same
+        profiles) is then just a cheap slice-and-sum of those two cached
+        profiles, with no further raw-data I/O. Layers are assigned to a
+        depth range by their nominal midpoint (``z_l``); see
+        :data:`OCEAN_HEAT_CONTENT_DEPTH_RANGES`.
+
+        Potential temperature is read and reduced to its profile *before*
+        salinity (two separate, sequential calls into dask), not combined
+        into one graph/compute() call: building one combined dataset out
+        of every depth-range branch for both variables at once previously
+        caused dask's threaded scheduler to hold far more in-flight chunks
+        than it needed to, and reliably OOM-crashed the kernel.
+
+        Saved to ``<folder>/<name>_ocean_heat_content.nc``:
+        ``thetao_volcello_profile``, ``so_volcello_profile``,
+        ``volcello_profile`` (all ``(time, z_l)``), plus the derived
+        ``thetao_surface``, ``thetao_0_300m``, ... and matching ``so_*``.
+        """
+        files = self.args.OUTDIR + '/' + self.args.z
+        ds = xr.open_mfdataset(
+            files, parallel=True, data_vars='minimal',
+            coords='minimal', compat='override',
+            preprocess=lambda ds: ds[['thetao', 'so', 'volcello']])
+
+        volcello = ds['volcello']   # (time, z_l, yh, xh); NaN over land / below bottom
+
+        dataset = xr.Dataset()
+        with ProgressBar():
+            print('Computing potential temperature vertical profile...')
+            dataset['thetao_volcello_profile'] = (
+                (ds['thetao'] * volcello).sum(['xh', 'yh']).compute())
+            dataset['volcello_profile'] = volcello.sum(['xh', 'yh']).compute()
+
+            print('Computing salinity vertical profile...')
+            dataset['so_volcello_profile'] = (
+                (ds['so'] * volcello).sum(['xh', 'yh']).compute())
+
+        dataset['thetao_volcello_profile'].attrs.update({
+            'long_name': 'Horizontal integral of thetao * volcello',
+            'units': 'degC m3',
+        })
+        dataset['so_volcello_profile'].attrs.update({
+            'long_name': 'Horizontal integral of so * volcello',
+            'units': 'psu m3',
+        })
+        dataset['volcello_profile'].attrs.update({
+            'long_name': 'Horizontal integral of volcello',
+            'units': 'm3',
+        })
+
+        # Derive every depth-range average from the two (time, z_l)
+        # profiles above -- already in memory, no further raw-data I/O.
+        vprof = dataset['volcello_profile']
+        ranges = [('surface', None, None)] + self.OCEAN_HEAT_CONTENT_DEPTH_RANGES
+        for var, long_name, units in [('thetao', 'Potential temperature', 'degC'),
+                                      ('so', 'Salinity', 'psu')]:
+            tprof = dataset[f'{var}_volcello_profile']
+            for label, lo, hi in ranges:
+                if label == 'surface':
+                    da = tprof.isel(z_l=0) / vprof.isel(z_l=0)
+                else:
+                    if lo is None:
+                        zmask = tprof['z_l'] <= hi
+                    elif hi is None:
+                        zmask = tprof['z_l'] > lo
+                    else:
+                        zmask = (tprof['z_l'] > lo) & (tprof['z_l'] <= hi)
+                    t_bin = tprof.where(zmask, drop=True)
+                    v_bin = vprof.where(zmask, drop=True)
+                    da = t_bin.sum('z_l') / v_bin.sum('z_l')
+                da.attrs.update({
+                    'long_name': f'{long_name}, volume-averaged '
+                                 f'({label.replace("_", "-")})',
+                    'units': units,
+                })
+                dataset[f'{var}_{label}'] = da
+
+        attrs = {
+            'description': 'Monthly area/volume-averaged temperature and '
+                           'salinity by depth range',
+            'casename': self.name,
+        }
+        add_global_attrs(dataset, attrs)
+        dataset.to_netcdf(self._path('ocean_heat_content.nc'))
