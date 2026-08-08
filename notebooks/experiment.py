@@ -29,6 +29,7 @@ import numpy as np
 import xarray as xr
 import yaml
 from dask.diagnostics import ProgressBar
+from scipy import integrate
 
 from mom6_tools.MOM6grid import MOM6grid
 from mom6_tools.m6toolbox import (
@@ -37,6 +38,41 @@ from mom6_tools.m6toolbox import (
     genBasinMasks,
     weighted_temporal_mean_vars,
 )
+
+
+def inferred_heat_transport(energy_in, lat=None, latax=None):
+    """Poleward heat transport as the meridional integral of a local energy
+    imbalance (diagnostic, not directly simulated -- inferred from the
+    energy budget, e.g. TOA - surface net flux for the atmosphere).
+
+    ``energy_in``: energy imbalance [W m-2], positive into the column, as a
+    1-D ``xarray.DataArray`` (or plain numpy array, with ``lat``/``latax``
+    then required). Returns the cumulative poleward transport in PW,
+    starting from 0 at the southernmost latitude.
+    """
+    if lat is None:
+        try:
+            lat = energy_in.lat
+        except AttributeError:
+            raise ValueError('Need to supply latitude array if input data '
+                             'is not self-describing.')
+    lat_rad = np.deg2rad(lat)
+    coslat = np.cos(lat_rad)
+    field = coslat * energy_in
+    if latax is None:
+        try:
+            latax = field.get_axis_num('lat')
+        except AttributeError:
+            raise ValueError('Need to supply axis number for integral '
+                             'over latitude.')
+    integral = integrate.cumulative_trapezoid(field, x=lat_rad, initial=0.,
+                                              axis=latax)
+    result = 1e-15 * 2 * np.pi * 6.371e6 ** 2 * integral
+    if isinstance(field, xr.DataArray):
+        result_xarray = field.copy()
+        result_xarray.values = result
+        return result_xarray
+    return result
 
 
 class Experiment:
@@ -243,13 +279,27 @@ class Experiment:
         ``sst_eof1`` gives the fraction of area-weighted variance explained."""
         return xr.open_dataset(self._path('sst_eof1.nc'))
 
+    def nao(self):
+        """Dataset with the leading EOF of North Atlantic sea-level pressure
+        anomalies (the PC-based NAO index): the spatial pattern
+        ``nao_pattern`` (lat, lon) [hPa per +1 std of PC1] and the
+        standardized principal component ``nao_pc`` (time). The
+        ``explained_variance`` attribute of ``nao_pattern`` gives the
+        fraction of ``cos(lat)``-weighted variance explained. See
+        :meth:`compute_nao`."""
+        return xr.open_dataset(self._path('nao.nc'))
+
     def uv_mean(self):
         """Dataset with the time-mean full 3D velocity: zonal ``uo``
         (z_l, yh, xq) and meridional ``vo`` (z_l, yq, xh) [m s-1]."""
         return xr.open_dataset(self._path('uv_mean.nc'))
 
     def atm_mean(self):
-        return xr.open_dataset(self._path('atm_time_mean.nc'))
+        """Dataset with the time-mean atmospheric state: surface temperature
+        ``TS_mean`` (lat, lon), zonal-mean temperature ``T_mean`` and zonal
+        wind ``U_mean`` (lev, lat), and the diagnosed zonal-mean meridional
+        atmospheric heat transport ``atm_heat_transport`` (lat) [PW]. See
+        :meth:`compute_atm`."""
         return xr.open_dataset(self._path('atm_time_mean.nc'))
 
     def heat_transport(self):
@@ -341,6 +391,24 @@ class Experiment:
         dataset.to_netcdf(self._path('ice_volume.nc'))
 
     def compute_atm(self):
+        """Time-mean atmospheric state from the CAM history (years 31-54):
+        surface temperature, zonal-mean temperature/zonal wind, and the
+        diagnosed zonal-mean meridional atmospheric heat transport.
+
+        The heat transport is *inferred*, not directly simulated: it is the
+        meridional integral (:func:`inferred_heat_transport`) of the
+        column energy imbalance ``(TOA net) - (surface net)``, with
+
+        - TOA net = ``FSNT - FLNT``
+        - surface net = ``FSNS - LHFLX - SHFLX - FLNS``
+
+        (all positive downward, so the imbalance is positive into the
+        atmospheric column). Zonal-mean and time-mean commute with this
+        (linear) construction, so it is computed once from the already
+        zonal/time-averaged imbalance rather than per time step. Saved
+        (with ``TS_mean``/``T_mean``/``U_mean``) to
+        ``<folder>/<name>_atm_time_mean.nc``.
+        """
         casename = self.args.casename
         files = [f'{self.args.ATMDIR}/{casename}.cam.h0a.00{year}-{month:02d}.nc'
                  for year in range(31, 55) for month in range(1, 13)]
@@ -350,6 +418,19 @@ class Experiment:
         dataset['TS_mean'] = ds.TS.mean('time').compute()
         dataset['T_mean'] = ds.T.mean('lon').compute().mean('time')
         dataset['U_mean'] = ds.U.mean('lon').compute().mean('time')
+
+        nTOA = ds['FSNT'] - ds['FLNT']
+        Qnet = ds['FSNS'] - ds['LHFLX'] - ds['SHFLX'] - ds['FLNS']
+        energy_in = (nTOA - Qnet).mean('lon').mean('time').compute()
+        ht = inferred_heat_transport(energy_in)
+        ht.name = 'atm_heat_transport'
+        ht.attrs.update({
+            'long_name': 'Inferred zonal-mean meridional atmospheric heat '
+                         'transport (TOA net - surface net, integrated over '
+                         'latitude)',
+            'units': 'PW',
+        })
+        dataset['atm_heat_transport'] = ht
 
         with ProgressBar():
             dataset.to_netcdf(self._path('atm_time_mean.nc'))
@@ -741,6 +822,124 @@ class Experiment:
 
         xr.Dataset({'sst_eof1': eof, 'sst_pc1': pc}).to_netcdf(
             self._path('sst_eof1.nc'))
+
+    def compute_nao(self):
+        """North Atlantic Oscillation: leading EOF of sea-level pressure
+        anomalies over the Atlantic sector (20-80N, 90W-40E), following the
+        NCAR/Hurrell PC-based NAO index definition (leading EOF of SLP
+        anomalies over the Atlantic sector, used to track the seasonal
+        Icelandic low / Azores high).
+
+        Reads monthly sea-level pressure (``PSL``) from the CAM history,
+        restricts to the Atlantic box, and removes the monthly climatology
+        (deseasonalised anomalies). Unlike :meth:`compute_sst_eof1`, no
+        linear trend is removed: the NAO is an atmospheric internal-
+        variability mode, not expected to trend, so the raw deseasonalised
+        anomalies are used directly (as in the NCAR definition). The first
+        EOF is computed weighted by ``sqrt(cos(lat))`` (the standard
+        area-weighting for a regular lat/lon grid), analogous in spirit to
+        the ocean-area weighting in :meth:`compute_sst_eof1`. The sign
+        convention is fixed so that positive PC1 corresponds to a stronger
+        Icelandic low (negative loading near 65N, 20W) -- the canonical
+        positive NAO phase.
+
+        This is a first pass at the diagnostic: the official Hurrell index
+        is computed separately for each calendar month (or for the DJFM
+        season only); here a single EOF is fit to the full monthly anomaly
+        time series year-round.
+
+        Saved to ``<folder>/<name>_nao.nc`` (variables ``nao_pattern``
+        (lat, lon) [hPa per +1 std of PC1] and ``nao_pc`` (time),
+        standardised to unit variance; ``nao_pattern`` carries an
+        ``explained_variance`` attribute).
+        """
+        casename = self.args.casename
+        files = [f'{self.args.ATMDIR}/{casename}.cam.h0a.00{year}-{month:02d}.nc'
+                 for year in range(31, 55) for month in range(1, 13)]
+        ds = xr.open_mfdataset(
+            files, combine='by_coords',
+            preprocess=lambda ds: ds[['PSL']])
+
+        # Shift to -180..180 and sort so the Atlantic box (which straddles
+        # the 0/360 seam) is a single contiguous, monotonic slice.
+        ds = ds.assign_coords(lon=((ds['lon'] + 180.0) % 360.0) - 180.0)
+        ds = ds.sortby('lon')
+
+        # Atlantic sector: 20-80N, 90W-40E.
+        lat_mask = (ds['lat'] >= 20) & (ds['lat'] <= 80)
+        lon_mask = (ds['lon'] >= -90) & (ds['lon'] <= 40)
+        psl = ds['PSL'].where(lat_mask & lon_mask, drop=True) / 100.0  # Pa -> hPa
+
+        with ProgressBar():
+            psl = psl.load()
+
+        # Deseasonalised anomalies (monthly climatology removed; no
+        # detrending -- see docstring).
+        clim = psl.groupby('time.month').mean('time')
+        anom = psl.groupby('time.month') - clim                # (time, lat, lon)
+
+        nt, ny, nx = anom.shape
+        A = anom.values.reshape(nt, ny * nx)                    # (time, space)
+
+        # sqrt(cos(lat)) area weighting for a regular lat/lon grid.
+        coslat = np.cos(np.deg2rad(anom['lat'].values))
+        w = np.sqrt(np.broadcast_to(coslat[:, None], (ny, nx))).reshape(ny * nx)
+
+        mask = np.isfinite(w) & np.isfinite(A).all(axis=0)
+        A = A[:, mask]
+        w = w[mask]
+
+        # Ensure a zero temporal mean before decomposing.
+        A = A - A.mean(axis=0, keepdims=True)
+
+        B = A * w[None, :]
+        _, S, Vt = np.linalg.svd(B, full_matrices=False)
+
+        v1 = Vt[0]
+        pc_raw = B @ v1
+        pc1 = pc_raw / pc_raw.std()                             # unit variance
+        pattern = (A * pc1[:, None]).mean(axis=0)               # regression [hPa]
+        explained = float(S[0] ** 2 / (S ** 2).sum())
+
+        pat_full = np.full(ny * nx, np.nan)
+        pat_full[mask] = pattern
+        pat2d = pat_full.reshape(ny, nx)
+
+        # Sign convention: positive PC1 = stronger Icelandic low, i.e.
+        # negative loading near 65N, 20W -- the canonical positive NAO phase.
+        ilat = int(np.argmin(np.abs(anom['lat'].values - 65.0)))
+        ilon = int(np.argmin(np.abs(anom['lon'].values - (-20.0))))
+        if pat2d[ilat, ilon] > 0:
+            pat2d = -pat2d
+            pc1 = -pc1
+
+        pattern_da = xr.DataArray(
+            pat2d, dims=('lat', 'lon'),
+            coords={'lat': anom['lat'], 'lon': anom['lon']}, name='nao_pattern')
+        pattern_da.attrs.update({
+            'long_name': 'Leading EOF of North Atlantic sea-level pressure '
+                         'anomalies (regression onto standardised PC1)',
+            'units': 'hPa',
+            'explained_variance': explained,
+            'start_date': self.args.start_date,
+            'end_date': self.args.end_date,
+            'casename': self.name,
+        })
+
+        pc_da = xr.DataArray(
+            pc1, dims=('time',), coords={'time': anom['time']}, name='nao_pc')
+        pc_da.attrs.update({
+            'long_name': 'Standardised NAO principal component (PC1 of '
+                         'North Atlantic SLP anomalies)',
+            'units': '1 (unit variance)',
+            'explained_variance': explained,
+            'start_date': self.args.start_date,
+            'end_date': self.args.end_date,
+            'casename': self.name,
+        })
+
+        xr.Dataset({'nao_pattern': pattern_da, 'nao_pc': pc_da}).to_netcdf(
+            self._path('nao.nc'))
 
     def compute_uv_mean(self):
         """Time-mean full 3D zonal and meridional velocity.
